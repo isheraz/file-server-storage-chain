@@ -109,7 +109,7 @@ export class FileController {
     for (let i = 0; i < ipfsMetaData.length; i++) {
       const fileRespone = await firstValueFrom(
         this.httpService
-          .get(`http://localhost:8080/api/v0/cat/${ipfsMetaData[i].cid}`, {
+          .get(`http://46.101.133.110:8080/api/v0/cat/${ipfsMetaData[i].cid}`, {
             responseType: 'arraybuffer',
           })
           .pipe(
@@ -119,6 +119,7 @@ export class FileController {
             }),
           ),
       );
+      console.log('fileRespone ====', fileRespone);
       const decryptedData = await decryptedSecretKeyAndFile(
         accessData.data,
         accessData.secretKey,
@@ -127,6 +128,7 @@ export class FileController {
         fileRespone,
         accessData.salt,
       );
+      console.log('decryptedData ====', decryptedData);
 
       readableStream.push(Buffer.from(decryptedData));
     }
