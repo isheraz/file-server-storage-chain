@@ -10,7 +10,10 @@ import { HttpService } from '@nestjs/axios';
 import type { Response } from 'express';
 import { Readable } from 'stream';
 import { firstValueFrom, map } from 'rxjs';
-
+const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
+const ffmpeg = require('fluent-ffmpeg');
+ffmpeg.setFfmpegPath(ffmpegPath);
+const fs = require('fs');
 const crypto = require('crypto').webcrypto;
 
 async function generateSecretKeyForEncryption(
@@ -88,6 +91,117 @@ export class FileController {
     private readonly httpService: HttpService,
   ) {}
 
+  @Get('access/:accessKey/play')
+  async playVideo(@Res() res: Response, @Param() params, @Req() req) {
+    const { accessKey } = params;
+    const accessData = await this.fileAccessModel.findOne({ accessKey });
+    // @ts-ignore
+    const ipfsMetaData = accessData.fileMetaData.sort(function (a, b) {
+      return a.index - b.index;
+    });
+    const path = `${accessData.accessKey}${accessData.fileName}`;
+    fs.access(path, fs.constants.F_OK, async (error) => {
+      if (error) {
+        const writableStream = fs.createWriteStream(path);
+
+        for (let i = 0; i < ipfsMetaData.length; i++) {
+          const fileRespone = await firstValueFrom(
+            this.httpService
+              .get(
+                `http://46.101.133.110:8080/api/v0/cat/${ipfsMetaData[i].cid}`,
+                {
+                  responseType: 'arraybuffer',
+                },
+              )
+              .pipe(
+                map((response) => {
+                  // console.log(response);
+                  return response.data;
+                }),
+              ),
+          );
+          console.log('fileRespone ====', fileRespone);
+          const decryptedData = await decryptedSecretKeyAndFile(
+            accessData.data,
+            accessData.secretKey,
+            accessData.accessKey,
+            accessData.iv,
+            fileRespone,
+            accessData.salt,
+          );
+          console.log('decryptedData ====', decryptedData);
+
+          writableStream.write(Buffer.from(decryptedData));
+        }
+        writableStream.end();
+        writableStream.on('finish', () => {
+          const stat = fs.statSync(path);
+          const fileSize = stat.size;
+          const range = req.headers.range;
+
+          if (range) {
+            const parts = range.replace(/bytes=/, '').split('-');
+            const start = parseInt(parts[0], 10);
+            const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+            const chunksize = end - start + 1;
+            const file = fs.createReadStream(path, { start, end });
+            const head = {
+              'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+              'Accept-Ranges': 'bytes',
+              'Content-Length': chunksize,
+              'Content-Type': 'video/mp4',
+            };
+            res.writeHead(206, head);
+            file.pipe(res);
+          } else {
+            const head = {
+              'Content-Length': fileSize,
+              'Content-Type': 'video/mp4',
+            };
+            res.writeHead(200, head);
+            const fileReadStream = fs.createReadStream(path);
+            res.addListener('finish', () => {
+              console.log('response finish');
+            });
+            fileReadStream.pipe(res);
+
+            // fileReadStream.destroy();
+            // fs.unlinkSync(path);
+          }
+        });
+      } else {
+        const stat = fs.statSync(path);
+        const fileSize = stat.size;
+        const range = req.headers.range;
+
+        if (range) {
+          const parts = range.replace(/bytes=/, '').split('-');
+          const start = parseInt(parts[0], 10);
+          const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+          const chunksize = end - start + 1;
+          const file = fs.createReadStream(path, { start, end });
+          const head = {
+            'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+            'Accept-Ranges': 'bytes',
+            'Content-Length': chunksize,
+            'Content-Type': 'video/mp4',
+          };
+          res.writeHead(206, head);
+          file.pipe(res);
+        } else {
+          const head = {
+            'Content-Length': fileSize,
+            'Content-Type': 'video/mp4',
+          };
+          res.writeHead(200, head);
+          const fileReadStream = fs.createReadStream(path);
+          fileReadStream.pipe(res);
+          // fileReadStream.destroy();
+        }
+      }
+    });
+  }
+
   @Get('access/:accessKey')
   async getAcessFile(@Res() res: Response, @Param() params, @Req() req) {
     const { accessKey } = params;
@@ -98,6 +212,7 @@ export class FileController {
     });
 
     console.log('ipfsMetaData ====', ipfsMetaData);
+
     res.set({
       'Content-Type': 'application/octet-stream',
       'Content-Disposition': `filename="${accessData.fileName}"`,
