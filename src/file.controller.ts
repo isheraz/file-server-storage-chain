@@ -107,12 +107,9 @@ export class FileController {
         for (let i = 0; i < ipfsMetaData.length; i++) {
           const fileRespone = await firstValueFrom(
             this.httpService
-              .get(
-                `http://46.101.133.110:8080/api/v0/cat/${ipfsMetaData[i].cid}`,
-                {
-                  responseType: 'arraybuffer',
-                },
-              )
+              .get(`http://localhost:8080/api/v0/cat/${ipfsMetaData[i].cid}`, {
+                responseType: 'arraybuffer',
+              })
               .pipe(
                 map((response) => {
                   // console.log(response);
@@ -160,9 +157,6 @@ export class FileController {
             };
             res.writeHead(200, head);
             const fileReadStream = fs.createReadStream(path);
-            res.addListener('finish', () => {
-              console.log('response finish');
-            });
             fileReadStream.pipe(res);
 
             // fileReadStream.destroy();
@@ -224,7 +218,7 @@ export class FileController {
     for (let i = 0; i < ipfsMetaData.length; i++) {
       const fileRespone = await firstValueFrom(
         this.httpService
-          .get(`http://46.101.133.110:8080/api/v0/cat/${ipfsMetaData[i].cid}`, {
+          .get(`http://localhost:8080/api/v0/cat/${ipfsMetaData[i].cid}`, {
             responseType: 'arraybuffer',
           })
           .pipe(
