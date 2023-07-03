@@ -1,20 +1,28 @@
 /* eslint-disable @typescript-eslint/ban-ts-comment */
 /* eslint-disable @typescript-eslint/no-var-requires */
-import { Controller, Get, Res, Param, Req } from '@nestjs/common';
-import { InjectModel } from '@nestjs/mongoose';
-import { FileAccess, FileAccessDocument } from './file-access.entity';
-import { Model } from 'mongoose';
+import {
+  Controller,
+  Get,
+  Res,
+  Param,
+  Req,
+  HttpStatus,
+  Post,
+} from '@nestjs/common';
 
 import { HttpService } from '@nestjs/axios';
 
 import type { Response } from 'express';
 import { Readable } from 'stream';
 import { firstValueFrom, map } from 'rxjs';
+import { FileService } from './file.service';
 const ffmpegPath = require('@ffmpeg-installer/ffmpeg').path;
 const ffmpeg = require('fluent-ffmpeg');
 ffmpeg.setFfmpegPath(ffmpegPath);
 const fs = require('fs');
 const crypto = require('crypto').webcrypto;
+const jwt = require('jsonwebtoken');
+const util = require('util');
 
 async function generateSecretKeyForEncryption(
   secreteKeyString: string,
@@ -40,7 +48,6 @@ async function generateSecretKeyForEncryption(
     true,
     ['encrypt', 'decrypt'],
   );
-  console.log('derivedKey ===', derivedKey);
   return derivedKey;
 }
 
@@ -83,41 +90,79 @@ const decryptedSecretKeyAndFile = async (
   return encrtedData;
 };
 
-@Controller('file')
+@Controller('api/file')
 export class FileController {
+  // private ipAddresses: string[];
   constructor(
-    @InjectModel(FileAccess.name)
-    private fileAccessModel: Model<FileAccessDocument>,
     private readonly httpService: HttpService,
-  ) {}
+    private readonly fileService: FileService,
+  ) {
+    this.fileService.saveNodeOsDetails();
+  }
 
-  @Get('access/:accessKey/play')
+  @Get('node/status')
+  async getStatus(@Res() res: Response, @Param() _params, @Req() _req) {
+    const cluster = await this.fileService.getClusterId();
+    const clusterId = cluster?.addresses[cluster.addresses.length - 1] || null;
+    return res.send({ isClusterOnline: !!clusterId });
+  }
+
+  @Get('view/access-play/:accessKey/:token?')
   async playVideo(@Res() res: Response, @Param() params, @Req() req) {
-    const { accessKey } = params;
-    const accessData = await this.fileAccessModel.findOne({ accessKey });
-    // @ts-ignore
-    const ipfsMetaData = accessData.fileMetaData.sort(function (a, b) {
-      return a.index - b.index;
-    });
-    const path = `${accessData.accessKey}${accessData.fileName}`;
-    fs.access(path, fs.constants.F_OK, async (error) => {
-      if (error) {
+    try {
+      const { accessKey, token } = params;
+      // const userRawResponse = fs.readFileSync(
+      //   'src/config/node-config.json',
+      //   'utf8',
+      // );
+
+      // const userAuthToken = JSON.parse(userRawResponse);
+
+      const accessDataResponse = await firstValueFrom(
+        this.httpService
+          .post(
+            `${process.env.API_SERVER_URL}/file/access/verify-token`,
+            {
+              accessKey,
+              token,
+            },
+            // {
+            //   headers: { Authorization: `Bearer ${userAuthToken?.authToken}` },
+            // },
+          )
+          .pipe(
+            map((response) => {
+              return response.data;
+            }),
+          ),
+      );
+      const accessData = accessDataResponse?.data;
+
+      // @ts-ignore
+      const ipfsMetaData = accessData.fileMetaData.sort(function (a, b) {
+        return a.index - b.index;
+      });
+
+      const path = `videos/${accessData.accessKey}${accessData.fileName}`;
+      if (!fs.existsSync(path)) {
         const writableStream = fs.createWriteStream(path);
 
         for (let i = 0; i < ipfsMetaData.length; i++) {
           const fileRespone = await firstValueFrom(
             this.httpService
-              .get(`http://localhost:8080/api/v0/cat/${ipfsMetaData[i].cid}`, {
-                responseType: 'arraybuffer',
-              })
+              .get(
+                `http://46.101.133.110:8080/api/v0/cat/${ipfsMetaData[i].cid}`,
+                {
+                  responseType: 'arraybuffer',
+                },
+              )
               .pipe(
                 map((response) => {
-                  // console.log(response);
                   return response.data;
                 }),
               ),
           );
-          console.log('fileRespone ====', fileRespone);
+
           const decryptedData = await decryptedSecretKeyAndFile(
             accessData.data,
             accessData.secretKey,
@@ -126,9 +171,7 @@ export class FileController {
             fileRespone,
             accessData.salt,
           );
-          console.log('decryptedData ====', decryptedData);
-
-          writableStream.write(Buffer.from(decryptedData));
+          await writableStream.write(Buffer.from(decryptedData));
         }
         writableStream.end();
         writableStream.on('finish', () => {
@@ -149,6 +192,22 @@ export class FileController {
               'Content-Type': 'video/mp4',
             };
             res.writeHead(206, head);
+            file.on('end', () => {
+              fs.unlink(path, async (error) => {
+                // TODO: add node authendication token.
+                // await firstValueFrom(
+                //   this.httpService
+                //     .post(
+                //       `${process.env.API_SERVER_URL}/file/access/change/token-salt/${accessData._id}`,
+                //     )
+                //     .pipe(
+                //       map((response) => {
+                //         return response.data;
+                //       }),
+                //     ),
+                // );
+              });
+            });
             file.pipe(res);
           } else {
             const head = {
@@ -157,15 +216,29 @@ export class FileController {
             };
             res.writeHead(200, head);
             const fileReadStream = fs.createReadStream(path);
+            fileReadStream.on('end', () => {
+              // fs.unlink(path, async (error) => {
+              //   // TODO: add node authendication token.
+              //   await firstValueFrom(
+              //     this.httpService
+              //       .post(
+              //         `${process.env.API_SERVER_URL}/file/access/change/token-salt/${accessData._id}`,
+              //       )
+              //       .pipe(
+              //         map((response) => {
+              //           return response.data;
+              //         }),
+              //       ),
+              //   );
+              // });
+            });
             fileReadStream.pipe(res);
-
-            // fileReadStream.destroy();
-            // fs.unlinkSync(path);
           }
         });
       } else {
         const stat = fs.statSync(path);
         const fileSize = stat.size;
+
         const range = req.headers.range;
 
         if (range) {
@@ -173,7 +246,11 @@ export class FileController {
           const start = parseInt(parts[0], 10);
           const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
           const chunksize = end - start + 1;
-          const file = fs.createReadStream(path, { start, end });
+
+          const file = fs.createReadStream(path, {
+            start,
+            end,
+          });
           const head = {
             'Content-Range': `bytes ${start}-${end}/${fileSize}`,
             'Accept-Ranges': 'bytes',
@@ -181,6 +258,23 @@ export class FileController {
             'Content-Type': 'video/mp4',
           };
           res.writeHead(206, head);
+          file.on('end', () => {
+            fs.unlink(path, async (error) => {
+              console.log(error);
+              // TODO: add node authendication token.
+              // await firstValueFrom(
+              //   this.httpService
+              //     .post(
+              //       `${process.env.API_SERVER_URL}/file/access/change/token-salt/${accessData._id}`,
+              //     )
+              //     .pipe(
+              //       map((response) => {
+              //         return response.data;
+              //       }),
+              //     ),
+              // );
+            });
+          });
           file.pipe(res);
         } else {
           const head = {
@@ -189,58 +283,231 @@ export class FileController {
           };
           res.writeHead(200, head);
           const fileReadStream = fs.createReadStream(path);
+          fileReadStream.on('end', () => {
+            fs.unlink(path, async (error) => {
+              console.log(error);
+              // TODO: add node authendication token.
+              // await firstValueFrom(
+              //   this.httpService
+              //     .post(
+              //       `${process.env.API_SERVER_URL}/file/access/change/token-salt/${accessData._id}`,
+              //     )
+              //     .pipe(
+              //       map((response) => {
+              //         return response.data;
+              //       }),
+              //     ),
+              // );
+            });
+          });
           fileReadStream.pipe(res);
-          // fileReadStream.destroy();
         }
       }
-    });
+    } catch (error) {
+      console.log('play error =====', error);
+    }
   }
 
-  @Get('access/:accessKey')
-  async getAcessFile(@Res() res: Response, @Param() params, @Req() req) {
-    const { accessKey } = params;
-    const accessData = await this.fileAccessModel.findOne({ accessKey });
-    // @ts-ignore
-    const ipfsMetaData = accessData.fileMetaData.sort(function (a, b) {
-      return a.index - b.index;
-    });
+  @Get('view/access/:accessKey/:token?')
+  async getAcessFile(@Res() res: Response, @Param() params) {
+    try {
+      // const userRawResponse = fs.readFileSync(
+      //   'src/config/node-config.json',
+      //   'utf8',
+      // );
 
-    console.log('ipfsMetaData ====', ipfsMetaData);
+      // const userAuthToken = JSON.parse(userRawResponse);
+      // console.log(
+      //   'file: file.controller.ts:292 ~ FileController ~ getAcessFile ~ authToken:',
+      //   userAuthToken,
+      // );
+      const { accessKey, token } = params;
 
-    res.set({
-      'Content-Type': 'application/octet-stream',
-      'Content-Disposition': `filename="${accessData.fileName}"`,
-    });
-    const readableStream = new Readable();
-    readableStream._read = () => {};
-    readableStream.pipe(res);
-
-    for (let i = 0; i < ipfsMetaData.length; i++) {
-      const fileRespone = await firstValueFrom(
+      console.log(
+        'file: file.controller.ts:328 ~ FileController ~ getAcessFile ~ accessKey, token:',
+        accessKey,
+        token,
+      );
+      const accessDataResponse = await firstValueFrom(
         this.httpService
-          .get(`http://localhost:8080/api/v0/cat/${ipfsMetaData[i].cid}`, {
-            responseType: 'arraybuffer',
-          })
+          .post(
+            `${process.env.API_SERVER_URL}/file/access/verify-token`,
+            {
+              accessKey,
+              token,
+            },
+            // {
+            //   headers: { Authorization: `Bearer ${userAuthToken?.authToken}` },
+            // },
+          )
           .pipe(
             map((response) => {
-              // console.log(response);
               return response.data;
             }),
           ),
       );
-      console.log('fileRespone ====', fileRespone);
-      const decryptedData = await decryptedSecretKeyAndFile(
-        accessData.data,
-        accessData.secretKey,
-        accessData.accessKey,
-        accessData.iv,
-        fileRespone,
-        accessData.salt,
-      );
-      console.log('decryptedData ====', decryptedData);
 
-      readableStream.push(Buffer.from(decryptedData));
+      const accessData = accessDataResponse?.data;
+
+      // await firstValueFrom(
+      //   this.httpService
+      //     .post(
+      //       `${process.env.API_SERVER_URL}/file/access/change/token-salt/${accessData._id}`,
+      //     )
+      //     .pipe(
+      //       map((response) => {
+      //         return response.data;
+      //       }),
+      //     ),
+      // );
+      // @ts-ignore
+      const ipfsMetaData = accessData.fileMetaData.sort(function (a, b) {
+        return a.index - b.index;
+      });
+      // let contentType = accessData?.fileType;
+      // if (download) {
+      //   contentType = 'application/octet-stream';
+      // }
+      res.set({
+        'Content-Type': accessData?.fileType,
+        'Content-Disposition': `filename="${accessData.fileName}"`,
+      });
+      const readableStream = new Readable();
+      readableStream._read = () => {};
+      readableStream.pipe(res).on;
+
+      for (let i = 0; i < ipfsMetaData.length; i++) {
+        const fileRespone = await firstValueFrom(
+          this.httpService
+            .get(
+              `http://46.101.133.110:8080/api/v0/cat/${ipfsMetaData[i].cid}`,
+              {
+                responseType: 'arraybuffer',
+              },
+            )
+            .pipe(
+              map((response) => {
+                // console.log(response);
+                return response.data;
+              }),
+            ),
+        );
+
+        const decryptedData = await decryptedSecretKeyAndFile(
+          accessData.data,
+          accessData.secretKey,
+          accessData.accessKey,
+          accessData.iv,
+          fileRespone,
+          accessData.salt,
+        );
+
+        readableStream.push(Buffer.from(decryptedData));
+      }
+      readableStream.push(null);
+    } catch (error) {
+      console.log('error ===', error?.response?.data || error?.message);
+      return res
+        .status(HttpStatus.NOT_FOUND)
+        .send(
+          error?.response?.data || { success: false, message: error?.message },
+        );
     }
-    readableStream.push(null);
+  }
+
+  @Get('download/:accessKey/:token?')
+  async downloadFile(@Res() res: Response, @Param() params) {
+    try {
+      const { accessKey, token } = params;
+
+      // const userRawResponse = fs.readFileSync(
+      //   'src/config/node-config.json',
+      //   'utf8',
+      // );
+
+      // const userAuthToken = JSON.parse(userRawResponse);
+
+      const accessDataResponse = await firstValueFrom(
+        this.httpService
+          .post(
+            `${process.env.API_SERVER_URL}/file/access/verify-token`,
+            {
+              accessKey,
+              token,
+            },
+            // {
+            //   headers: { Authorization: `Bearer ${userAuthToken?.authToken}` },
+            // },
+          )
+          .pipe(
+            map((response) => {
+              return response.data;
+            }),
+          ),
+      );
+
+      const accessData = accessDataResponse?.data;
+
+      // await firstValueFrom(
+      //   this.httpService
+      //     .post(
+      //       `${process.env.API_SERVER_URL}/file/access/change/token-salt/${accessData._id}`,
+      //     )
+      //     .pipe(
+      //       map((response) => {
+      //         return response.data;
+      //       }),
+      //     ),
+      // );
+      // @ts-ignore
+      const ipfsMetaData = accessData.fileMetaData.sort(function (a, b) {
+        return a.index - b.index;
+      });
+      // let contentType = accessData?.fileType;
+      // if (download) {
+      //   contentType = 'application/octet-stream';
+      // }
+
+      res.set({
+        'Content-Type': 'application/octet-stream',
+        'Content-Disposition': `filename="${accessData.fileName}"`,
+      });
+      const readableStream = new Readable();
+      readableStream._read = () => {};
+      readableStream.pipe(res).on;
+
+      for (let i = 0; i < ipfsMetaData.length; i++) {
+        const fileRespone = await firstValueFrom(
+          this.httpService
+            .get(
+              `http://46.101.133.110:8080/api/v0/cat/${ipfsMetaData[i].cid}`,
+              {
+                responseType: 'arraybuffer',
+              },
+            )
+            .pipe(
+              map((response) => {
+                // console.log(response);
+                return response.data;
+              }),
+            ),
+        );
+
+        const decryptedData = await decryptedSecretKeyAndFile(
+          accessData.data,
+          accessData.secretKey,
+          accessData.accessKey,
+          accessData.iv,
+          fileRespone,
+          accessData.salt,
+        );
+
+        readableStream.push(Buffer.from(decryptedData));
+      }
+      readableStream.push(null);
+    } catch (error) {
+      console.error('error ===', error);
+      return res.status(HttpStatus.NOT_FOUND).send();
+    }
   }
 }
